@@ -1,16 +1,23 @@
 # SnippetsBackend
 
-FastAPI REST backend for [SnippetsCLI](../SnippetsCLI). Connects to PostgreSQL and exposes a JSON API on port 8000.
+FastAPI REST backend for [SnippetsCLI](../SnippetsCLI). Connects to PostgreSQL, supports multiple users, and exposes a JSON API on port 8000. Accessible from a CLI or web frontend.
 
 ## Setup
 
 ### 1. Configure environment
 
-Copy `.env.example` to `.env` and fill in your PostgreSQL connection string:
+Copy `.env.example` to `.env` and fill in your values:
 
 ```
 DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+JWT_SECRET=<run: openssl rand -hex 32>
+ALLOWED_ORIGINS=https://your-frontend.com
+DEBUG=false
 ```
+
+- **JWT_SECRET** — long random string used to sign tokens. Keep it secret.
+- **ALLOWED_ORIGINS** — comma-separated list of allowed web origins. Leave empty if only serving a CLI.
+- **DEBUG** — set to `true` to enable `/docs` and `/redoc`.
 
 ### 2. Start with Docker
 
@@ -18,7 +25,7 @@ DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
 docker compose up --build
 ```
 
-The backend initialises the schema on startup (safe to run against an existing database — all `CREATE TABLE` statements use `IF NOT EXISTS`).
+The backend initialises the schema on startup (safe to run against an existing database — uses `IF NOT EXISTS` throughout, with migration support from v1).
 
 ### 3. Verify
 
@@ -34,7 +41,35 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-Requires `DATABASE_URL` to be set in the environment or in a `.env` file in the same directory.
+## Authentication
+
+All endpoints except `/health`, `/auth/register`, and `/auth/login` require a Bearer token.
+
+### Register
+
+```bash
+curl -X POST https://your-server/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'
+# {"token": "<jwt>"}
+```
+
+### Login
+
+```bash
+curl -X POST https://your-server/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'
+# {"token": "<jwt>"}
+```
+
+Tokens are valid for 30 days. Include the token in all subsequent requests:
+
+```
+Authorization: Bearer <token>
+```
+
+All data (notes, sources, tags) is scoped to the authenticated user. Users cannot access each other's data.
 
 ## API
 
@@ -42,9 +77,16 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 
 ### Health
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Returns `{"status":"ok"}` |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | No | Returns `{"status":"ok"}` |
+
+### Auth
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/register` | No | Create account, returns JWT |
+| POST | `/auth/login` | No | Login, returns JWT |
 
 ### Notes
 
@@ -76,6 +118,8 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 
 ### Source Types
 
+Shared across all users.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/source-types` | All source types |
@@ -83,6 +127,8 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 | GET | `/source-types/{id}` | Get a source type |
 
 ### Publishers
+
+Shared across all users.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -115,10 +161,15 @@ All endpoints return JSON. Dates are ISO 8601 strings.
 
 ```
 main.py          FastAPI app — routes, Pydantic models, lifespan handler
+auth.py          JWT token creation/verification, password hashing
 db.py            Data access layer (psycopg2, all SQL queries)
-schema.sql       PostgreSQL DDL + seed data
+schema.sql       PostgreSQL DDL + seed data (v2, with v1 migration)
 requirements.txt Python dependencies
 Dockerfile
 docker-compose.yml
 .env.example
 ```
+
+## License
+
+MIT
