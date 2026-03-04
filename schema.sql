@@ -140,3 +140,46 @@ BEGIN
         INSERT INTO schema_version (version) VALUES (4);
     END IF;
 END $$;
+
+-- === Migration v5: login_attempts table for brute-force protection ===
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL,
+    attempted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time ON login_attempts(username, attempted_at);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 5) THEN
+        INSERT INTO schema_version (version) VALUES (5);
+    END IF;
+END $$;
+
+-- === Migration v6: invite_codes table for registration gating ===
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id SERIAL PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    created_by INTEGER REFERENCES users(id),
+    used_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    used_at TIMESTAMP
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 6) THEN
+        INSERT INTO schema_version (version) VALUES (6);
+    END IF;
+END $$;
+
+-- === Migration v7: updated_at column on notes ===
+ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 7) THEN
+        INSERT INTO schema_version (version) VALUES (7);
+    END IF;
+END $$;

@@ -1,5 +1,6 @@
 """Database access layer for Snippets backend."""
 
+import secrets
 from pathlib import Path
 
 import psycopg2
@@ -20,6 +21,8 @@ def init_db(database_url: str, minconn: int = 2, maxconn: int = 10):
             sql = f.read()
         cur = conn.cursor()
         cur.execute(sql)
+        # Clean up login attempts older than 30 days
+        cur.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '30 days'")
         conn.commit()
     finally:
         pool.putconn(conn)
@@ -43,6 +46,89 @@ def get_user_by_username(conn, username: str) -> dict | None:
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE username = %s", (username,))
     return cur.fetchone()
+
+
+def get_user_by_id(conn, user_id: int) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+    return cur.fetchone()
+
+
+def delete_user(conn, user_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    conn.commit()
+
+
+def update_user_password(conn, user_id: int, password_hash: str):
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+    conn.commit()
+
+
+# --- Invite Codes ---
+
+def create_invite_code(conn, created_by: int | None = None) -> str:
+    code = secrets.token_urlsafe(16)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO invite_codes (code, created_by) VALUES (%s, %s)",
+        (code, created_by),
+    )
+    conn.commit()
+    return code
+
+
+def is_invite_code_valid(conn, code: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM invite_codes WHERE code = %s AND used_by IS NULL", (code,))
+    return cur.fetchone() is not None
+
+
+def validate_and_use_invite_code(conn, code: str, user_id: int) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE invite_codes SET used_by = %s, used_at = NOW() WHERE code = %s AND used_by IS NULL",
+        (user_id, code),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def get_invite_codes(conn, created_by: int) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, code, used_by, created_at, used_at FROM invite_codes WHERE created_by = %s ORDER BY created_at DESC",
+        (created_by,),
+    )
+    return cur.fetchall()
+
+
+# --- Login Attempt Tracking ---
+
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+
+
+def record_failed_login(conn, username: str):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO login_attempts (username) VALUES (%s)", (username,))
+    conn.commit()
+
+
+def get_recent_failed_attempts(conn, username: str) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM login_attempts WHERE username = %s AND attempted_at > NOW() - make_interval(mins => %s)",
+        (username, LOCKOUT_MINUTES),
+    )
+    return cur.fetchone()["count"]
+
+
+def clear_failed_attempts(conn, username: str):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM login_attempts WHERE username = %s", (username,))
+    conn.commit()
 
 
 # --- Token Revocation ---
@@ -82,10 +168,28 @@ def update_note_source(conn, note_id: int, source_id: int, user_id: int):
     conn.commit()
 
 
+def update_note_body(conn, note_id: int, body: str, user_id: int):
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE notes SET body = %s, updated_at = NOW() WHERE id = %s AND user_id = %s",
+        (body, note_id, user_id),
+    )
+    conn.commit()
+
+
 def get_note(conn, note_id: int, user_id: int) -> dict | None:
     cur = conn.cursor()
     cur.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, user_id))
     return cur.fetchone()
+
+
+def search_notes(conn, query: str, user_id: int, limit: int = 50) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM notes WHERE body ILIKE %s AND user_id = %s ORDER BY created_at DESC LIMIT %s",
+        (f"%{query}%", user_id, limit),
+    )
+    return cur.fetchall()
 
 
 def get_all_notes(conn, user_id: int) -> list[dict]:

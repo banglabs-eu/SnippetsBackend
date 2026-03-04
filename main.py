@@ -110,11 +110,17 @@ def get_user_id(request: Request) -> int:
 class RegisterBody(BaseModel):
     username: str
     password: str
+    invite_code: str
 
 
 class LoginBody(BaseModel):
     username: str
     password: str
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class CreateNoteBody(BaseModel):
@@ -126,6 +132,10 @@ class CreateNoteBody(BaseModel):
 
 class UpdateNoteSourceBody(BaseModel):
     source_id: int
+
+
+class UpdateNoteBodyRequest(BaseModel):
+    body: str
 
 
 class NoteIdsBody(BaseModel):
@@ -188,11 +198,16 @@ def register(body: RegisterBody, request: Request):
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if not body.username.strip():
         raise HTTPException(status_code=400, detail="Username required")
+    if not db.is_invite_code_valid(conn, body.invite_code):
+        raise HTTPException(status_code=400, detail="Invalid or already used invite code")
     existing = db.get_user_by_username(conn, body.username.strip())
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken")
     password_hash = auth.hash_password(body.password)
     user = db.create_user(conn, body.username.strip(), password_hash)
+    if not db.validate_and_use_invite_code(conn, body.invite_code, user["id"]):
+        db.delete_user(conn, user["id"])
+        raise HTTPException(status_code=400, detail="Invalid or already used invite code")
     token = auth.create_token(user["id"], user["username"])
     return {"token": token, "user_id": user["id"], "username": user["username"]}
 
@@ -200,9 +215,18 @@ def register(body: RegisterBody, request: Request):
 @app.post("/login")
 def login(body: LoginBody, request: Request):
     conn = get_conn(request)
-    user = db.get_user_by_username(conn, body.username.strip())
+    username = body.username.strip()
+    attempts = db.get_recent_failed_attempts(conn, username)
+    if attempts >= db.MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {db.LOCKOUT_MINUTES} minutes.",
+        )
+    user = db.get_user_by_username(conn, username)
     if not user or not auth.verify_password(body.password, user["password_hash"]):
+        db.record_failed_login(conn, username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    db.clear_failed_attempts(conn, username)
     token = auth.create_token(user["id"], user["username"])
     return {"token": token, "user_id": user["id"], "username": user["username"]}
 
@@ -214,9 +238,53 @@ def logout(request: Request):
     return {"ok": True}
 
 
+@app.post("/change-password")
+def change_password(body: ChangePasswordBody, request: Request):
+    conn = get_conn(request)
+    uid = get_user_id(request)
+    username = request.state.username
+    attempts = db.get_recent_failed_attempts(conn, username)
+    if attempts >= db.MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {db.LOCKOUT_MINUTES} minutes.",
+        )
+    user = db.get_user_by_id(conn, uid)
+    if not auth.verify_password(body.current_password, user["password_hash"]):
+        db.record_failed_login(conn, username)
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    db.clear_failed_attempts(conn, username)
+    db.update_user_password(conn, uid, auth.hash_password(body.new_password))
+    return {"ok": True}
+
+
 @app.get("/me")
 def me(request: Request):
     return {"user_id": get_user_id(request), "username": request.state.username}
+
+
+# --- Invite Codes ---
+
+_INVITE_ADMIN = os.environ.get("INVITE_ADMIN", "adam")
+
+
+@app.post("/invite-codes")
+def create_invite_code(request: Request):
+    if request.state.username != _INVITE_ADMIN:
+        raise HTTPException(status_code=403, detail="Only the invite admin can create invite codes")
+    conn = get_conn(request)
+    code = db.create_invite_code(conn, created_by=get_user_id(request))
+    return {"code": code}
+
+
+@app.get("/invite-codes")
+def list_invite_codes(request: Request):
+    if request.state.username != _INVITE_ADMIN:
+        raise HTTPException(status_code=403, detail="Only the invite admin can view invite codes")
+    conn = get_conn(request)
+    return to_list(db.get_invite_codes(conn, get_user_id(request)))
 
 
 # --- Notes ---
@@ -260,6 +328,14 @@ def get_tags_for_notes(body: NoteIdsBody, request: Request):
     return {str(k): to_list(v) for k, v in result.items()}
 
 
+@app.get("/notes/search")
+def search_notes(request: Request, q: str = Query(default="")):
+    conn = get_conn(request)
+    if not q.strip():
+        return []
+    return to_list(db.search_notes(conn, q.strip(), get_user_id(request)))
+
+
 @app.get("/notes")
 def get_notes(
     request: Request,
@@ -296,6 +372,16 @@ def update_note_source(note_id: int, body: UpdateNoteSourceBody, request: Reques
     if db.get_source(conn, body.source_id, uid) is None:
         raise HTTPException(status_code=404, detail="Source not found")
     db.update_note_source(conn, note_id, body.source_id, uid)
+    return {"ok": True}
+
+
+@app.patch("/notes/{note_id}/body")
+def update_note_body(note_id: int, body: UpdateNoteBodyRequest, request: Request):
+    conn = get_conn(request)
+    uid = get_user_id(request)
+    if db.get_note(conn, note_id, uid) is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    db.update_note_body(conn, note_id, body.body, uid)
     return {"ok": True}
 
 
