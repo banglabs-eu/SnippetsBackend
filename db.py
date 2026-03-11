@@ -511,6 +511,13 @@ def get_tag(conn, tag_id: int, user_id: int) -> dict | None:
     return cur.fetchone()
 
 
+def delete_tag(conn, tag_id: int, user_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM note_tags WHERE tag_id = %s", (tag_id,))
+    cur.execute("DELETE FROM tags WHERE id = %s AND user_id = %s", (tag_id, user_id))
+    conn.commit()
+
+
 def get_tag_by_name(conn, name: str, user_id: int) -> dict | None:
     cur = conn.cursor()
     cur.execute("SELECT * FROM tags WHERE name = %s AND user_id = %s", (name.strip().lower(), user_id))

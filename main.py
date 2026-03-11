@@ -632,6 +632,17 @@ def get_all_tags(request: Request):
     return to_list(db.get_all_tags(conn, get_user_id(request)))
 
 
+@app.delete("/tags/{tag_id}")
+def delete_tag(tag_id: int, request: Request):
+    conn = get_conn(request)
+    uid = get_user_id(request)
+    row = db.get_tag(conn, tag_id, uid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    db.delete_tag(conn, tag_id, uid)
+    return {"ok": True}
+
+
 @app.get("/tags/{tag_id}")
 def get_tag(tag_id: int, request: Request):
     conn = get_conn(request)
